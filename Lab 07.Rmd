@@ -1,0 +1,210 @@
+---
+title: "Lab 07"
+author: "Ellie Grace Moore"
+date: "03/12/2020"
+output: 
+  html_document: 
+    highlight: haddock
+    theme: cosmo
+    df_print: paged
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+library(tidymodels)
+library(tidyverse)
+library(glmnet)
+library(knitr)
+library(tibble)
+library(xgboost)
+library(dplyr)
+library(purrr)
+library(vctrs)
+library(rlang)
+library(ranger)
+```
+
+|         For this lab we will fit and compare the following three methods: a random forest, boosting decision trees, and elastic net. First we will set up our data sets (along with converting "extrovert" to a factor) and then we will fit a model using each of the methods mentioned above, then we will compare them all at the end.
+
+
+```{r data}
+set.seed(7)
+reddit <- read_csv("reddit_data.csv")
+reddit$extrovert <- as.factor(reddit$extrovert)
+
+reddit_split <- initial_split(reddit, prop=0.5)
+reddit_train <- training(reddit_split)
+reddit_test <- testing(reddit_split)
+
+reddit_cv <- vfold_cv(reddit_train, v=10)
+
+rec <- recipe(extrovert ~., data = reddit_train)
+```
+
+### Random Forest
+
+```{r rf}
+set.seed(7)
+model_spec <- rand_forest(
+  mode = "classification",
+  mtry = 25,
+  trees = tune()
+) %>%
+  set_engine("ranger")
+
+grid <- expand_grid(trees = c(10, 25, 50, 100, 200, 300))
+rand_forest <- tune_grid(model_spec,
+                   preprocessor = rec,
+                   grid = grid,
+                   resamples = reddit_cv)
+
+rand_forest %>% collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  arrange(desc(mean))
+
+
+```
+
+```{r rf testing}
+final_spec <- rand_forest(
+  mode = "classification",
+  mtry = 25,
+  trees = 25
+) %>%
+  set_engine("ranger")
+
+final_model <- fit(final_spec,
+                  extrovert ~ .,
+                   data = reddit_train)
+
+randfor_results <- final_model %>%
+  predict(new_data = reddit_test) %>%
+  bind_cols(reddit_test) %>%
+  metrics(truth = extrovert, estimate = .pred_class)
+
+method <- randfor_results$method <- "Random Forest"
+kable(randfor_results)
+```
+
+
+
+### Boosting 
+
+```{r boosting}
+set.seed(7)
+boost_spec <- boost_tree(
+  mode = "classification",
+  tree_depth = 1,
+  trees = tune(),
+  learn_rate = 0.01
+) %>%
+set_engine("xgboost")
+
+boosted <- tune_grid(boost_spec,
+                   preprocessor = rec,
+                   grid = grid,
+                   resamples = reddit_cv)
+boosted %>% 
+  collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  arrange(desc(mean))
+```
+
+
+```{r boosting testing}
+final_spec <- boost_tree(
+  mode = "classification",
+  mtry = 25,
+  trees = 200
+) %>%
+  set_engine("xgboost")
+
+final_model <- fit(final_spec,
+                  extrovert ~ .,
+                   data = reddit_train)
+
+boost_results <- final_model %>%
+  predict(new_data = reddit_test) %>%
+  bind_cols(reddit_test) %>%
+  metrics(truth = extrovert, estimate = .pred_class)
+method <- boost_results$method <- "Boosting"
+kable(boost_results)
+```
+
+### Elastic Net
+
+```{r elnet}
+set.seed(7)
+rec <- recipe(extrovert ~ ., data = reddit_train)
+
+penalty_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet")
+
+grid <- expand_grid(penalty = seq(0, 100, by = 10),
+                    mixture = seq(0, 1, by = 0.2))
+
+results <- tune_grid(penalty_spec, 
+                      preprocessor = rec,
+                     grid = grid,
+                     resamples = reddit_cv)
+
+results %>% collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  arrange(desc(mean))
+```
+```{r adj range}
+set.seed(7)
+rec <- recipe(extrovert ~ ., data = reddit_train)
+
+penalty_spec <- logistic_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet")
+
+grid <- expand_grid(penalty = seq(0, 10, by = 1),
+                    mixture = seq(0, 1, by = 0.1))
+
+results <- tune_grid(penalty_spec, 
+                      preprocessor = rec,
+                     grid = grid,
+                     resamples = reddit_cv)
+
+
+```
+
+```{r}
+results %>% collect_metrics() %>%
+  filter(.metric == "accuracy") %>%
+  arrange(desc(mean))
+```
+
+
+```{r elnet testing}
+set.seed(7)
+rec <- recipe(extrovert ~ ., data = reddit_train)
+
+penalty_spec <- logistic_reg(penalty = 2, mixture = 0) %>%
+  set_engine("glmnet")
+
+results <- last_fit(penalty_spec,
+                    preprocessor = rec,
+                    split = reddit_split)
+elnet_results <- results %>% 
+  collect_metrics()
+method <- elnet_results$method <- "Elastic Net"
+kable(elnet_results[,-4])
+
+```
+
+```{r}
+total_results <- bind_rows(randfor_results, boost_results, elnet_results)
+kable(total_results[, -5])
+```
+
+\newline
+\newline
+
+|           By looking at the table above, we are able to see that **boosting** results in the highest accuracy with a value of 0.724. Then a random forest closely follows with an accuracy of 0.716, then elastic net--which turns out to be ridge regression due to our mixture value being 0--yields the lowest accuracy with a value of 0.672. 
+
+\newline
+\newline
+
+|           Along the way, I made numerous judgments and conclusions based on the data. First, I noticed that "extrovert" is an indicator variable and thus must be converted to a factor. Secondly, I realized that when using a classification method, the metric we get is "accuracy" and thus it must be sorted in descending order since we want a higher accuracy--opposed to a lower RMSE. Next, I skipped right to elastic net versus first trying out ridge and lasso. Since elastic net is a combination of ridge and lasso, simply tuning the penalty and mixture value will tell me whether or not a ridge or lasso model will be appropriate for this data. 
+
